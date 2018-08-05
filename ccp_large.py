@@ -42,6 +42,11 @@ sparse_dist_mat = tree.sparse_distance_matrix(tree, 0.5)
 # 每个点/类都有一个weight，代表这个类的某种量
 weight = points['weight'].values
 
+# 最少与最多类数量相纸
+MIN_NUM_CLUSTER = 1
+MAX_NUM_CLUSTER = 50
+MAX_CAPACITY = 200
+
 
 # #########################
 # 进行模型构建
@@ -53,9 +58,13 @@ m = Model('CCP')
 """
 print('正在声明变量')
 # assign变量是分配变量，assign[i,j]=1代表i点属于以j为中心的类
-assign = m.addVars(range(sparse_dist_mat.shape[0]),
-                   range(sparse_dist_mat.shape[1]),
-                   vtype=GRB.BINARY, name='assignment')
+# 使用sparse indexing的用法，reference；
+# http://www.gurobi.com/documentation/8.0/refman/py_model_addvars.html
+
+assign = m.addVars([(i,j) for j in range(sparse_dist_mat.shape[0]) 
+                          for i in list(zip(*list(sparse_dist_mat[j].keys())))[1]],
+                    vtype=GRB.BINARY,
+                    name='assignment')
 # center变量是类中心变量，center[j]=1代表j点为类中心
 center = m.addVars(range(sparse_dist_mat.shape[0]),
                    vtype=GRB.BINARY, name='cluster_center')
@@ -67,13 +76,13 @@ center = m.addVars(range(sparse_dist_mat.shape[0]),
 print('正在声明约束')
 # 最少类别数目限制
 m.addConstr(
-    quicksum(center) >= 1,
+    quicksum(center) >= MIN_NUM_CLUSTER,
     'lower bound of number of cluster'
 )
 
 # 最大类别数目限制
 m.addConstr(
-    quicksum(center) <= 100,
+    quicksum(center) <= MAX_NUM_CLUSTER,
     'upper bound of number of cluster'
 )
 
@@ -85,21 +94,18 @@ m.addConstrs(
 
 # 保证只有当j点是类中心，才会有i点属于j点为中心的类
 m.addConstrs(
-    (assign[i, j] <= center[j] for i in range(sparse_dist_mat.shape[0]) for j in range(sparse_dist_mat.shape[0]))
+    (assign[i, j] <= center[j] for j in range(sparse_dist_mat.shape[0]) 
+                               for i in list(zip(*list(sparse_dist_mat[j].keys())))[1])
 )
 
 # 每个类某种量的限制不能超过某个限制
+# 这个约束容易产生飞地
 m.addConstrs(
-    (quicksum([assign[i, j] * weight[i] for i in range(sparse_dist_mat.shape[0])]) <= 100 for j in range(sparse_dist_mat.shape[0]))
-)
-
-# 添加约束，相隔远的点肯定不会归属于j类
-m.addConstrs(
-    (assign[i,j]==0 for j in range(sparse_dist_mat.shape[0]) for i in range(sparse_dist_mat.shape[0]) if i not in list(zip(*list(sparse_dist_mat[j].keys())))[1])
+    (quicksum([assign[i, j] * weight[i] for i in list(zip(*list(sparse_dist_mat[j].keys())))[1]]) <= MAX_CAPACITY for j in range(sparse_dist_mat.shape[0]))
 )
 
 # 各点到所属类的总距离
-sum_of_dist = quicksum([assign[i, j] * sparse_dist_mat[(i, j)] for j in range(sparse_dist_mat.shape[1]) for _,i in sparse_dist_mat[j].keys()])
+sum_of_dist = quicksum([10 * assign[i, j] * sparse_dist_mat[(i, j)] for j in range(sparse_dist_mat.shape[1]) for _,i in sparse_dist_mat[j].keys()])
 # 类的数量作为惩罚，尽量减少类的数量
 num_of_cluster = quicksum([center[i] for i in range(sparse_dist_mat.shape[0])])
 # 权衡总距离与类数量
@@ -107,6 +113,8 @@ m.setObjective(
     sum_of_dist + 0.5 * num_of_cluster, GRB.MINIMIZE)
 
 print('正在求解')
+m.Params.TIME_LIMIT = 600
+m.Params.MINGap = 0.05
 m.optimize()
 
 """
@@ -116,9 +124,12 @@ m.optimize()
 label = list()
 for i in range(sparse_dist_mat.shape[0]):
     for j in range(sparse_dist_mat.shape[0]):
-        if assign[i, j].x > 0.5:
-            label.append(j)
-            break
+        try:
+            if assign[i, j].x > 0.5:
+                label.append(j)
+                break
+        except:
+            continue
 
 points['label'] = label
 print('有{}点'.format(points.shape[0]))
